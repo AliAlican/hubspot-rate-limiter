@@ -1,57 +1,107 @@
 <?php
 
+declare(strict_types=1);
 
-use Predis\Client as Redis;
+use Illuminate\Cache\RedisStore;
+use Illuminate\Support\Facades\Cache;
 use HubSpot\Discovery\Discovery;
 
 class HubspotClientWrapper
 {
-    private Discovery $hubspotClient;
-    private Redis $redis;
-    private int $rateLimit;
-
-    public function __construct(Discovery $hubspotClient, Redis $redis, int $rateLimit = 100)
-    {
-        $this->hubspotClient = $hubspotClient;
-        $this->redis = $redis;
-        $this->rateLimit = $rateLimit;
+    public function __construct(
+        protected Discovery $hubspotClient,
+        protected Cache $cache,
+        protected int $secondLimit = 100,
+        protected int $dailyLimit = 250000,
+        protected int $retryInterval = 10000
+    ) {
     }
+
 
     public function __call(string $name, array $arguments)
     {
-        if (!$this->enforceRateLimit()) {
-            throw new \Exception('Rate limit exceeded');
+        while (!$this->enforceRateLimits()) {
+            usleep($this->retryInterval);
         }
 
         return call_user_func_array([$this->hubspotClient, $name], $arguments);
     }
 
-    private function enforceRateLimit(): bool
+    private function enforceRateLimits(): bool
     {
-        // Using microtime as a float to store timestamps with greater precision
         $now = microtime(true);
 
-        // Lua script for rate limiting
-        $lua = <<<LUA
-        local one_second_ago = tonumber(ARGV[1]) - 1
-        redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', one_second_ago)
-        local current = tonumber(redis.call('ZCARD', KEYS[1]))
-        if current < tonumber(ARGV[2]) then
-            redis.call('ZADD', KEYS[1], ARGV[1], ARGV[1])
+        $luaScript = <<<LUA
+            local second_limit_key = KEYS[1]
+            local daily_limit_key = KEYS[2]
+            local now = tonumber(ARGV[1])
+            local second_limit = tonumber(ARGV[2])
+            local daily_limit = tonumber(ARGV[3])
+
+            local one_second_ago = now - 1
+            local one_day_ago = now - 86400
+
+            -- Enforce the per-second limit
+            redis.call('ZREMRANGEBYSCORE', second_limit_key, '-inf', one_second_ago)
+            local current_second_count = tonumber(redis.call('ZCARD', second_limit_key))
+            if current_second_count >= second_limit then
+                return 0
+            end
+
+            -- Enforce the daily limit
+            redis.call('ZREMRANGEBYSCORE', daily_limit_key, '-inf', one_day_ago)
+            local current_daily_count = tonumber(redis.call('ZCARD', daily_limit_key))
+            if current_daily_count >= daily_limit then
+                return 0
+            end
+
+            -- If both checks passed, update the counts and allow the request
+            redis.call('ZADD', second_limit_key, now, now)
+            redis.call('ZADD', daily_limit_key, now, now)
             return 1
-        else
-            return 0
-        end
         LUA;
 
-        // Execute the Lua script and get the result
-        $result = $this->redis->eval($lua, [
-            'timestamps', // The key of the sorted set in Redis
-            $now,         // The current timestamp
-            $this->rateLimit, // The rate limit
-        ], 1);
+        if ($this->cache->getStore() instanceof RedisStore) {
+            $redis = $this->cache->getStore()->connection();
+            $result = $redis->eval(
+                $luaScript,
+                2,
+                'hubspot_second_limit',
+                'hubspot_daily_limit',
+                (string)$now,
+                (string)$this->secondLimit,
+                (string)$this->dailyLimit
+            );
+            return $result === 1;
+        } else {
+            $canPassSecondLimit = $this->genericRateLimit('hubspot_second_limit', $this->secondLimit, 1);
+            $canPassDailyLimit = $this->genericRateLimit('hubspot_daily_limit', $this->dailyLimit, 86400);
 
-        // Return whether the request is allowed
-        return $result === 1;
+            return $canPassSecondLimit && $canPassDailyLimit;
+        }
+    }
+
+    protected function genericRateLimit(string $limitKey, int $limitValue, int $interval): bool
+    {
+        $timestamps = $this->cache->get($limitKey, []);
+
+        $now = microtime(true);
+        $limitTimestamp = $now - ($interval * 1000000);;
+
+        // Filter out timestamps outside of the limiting interval
+        $timestamps = array_filter($timestamps, function ($timestamp) use ($limitTimestamp) {
+            return $timestamp > $limitTimestamp;
+        });
+
+        // If limit exceeded, return false
+        if (count($timestamps) >= $limitValue) {
+            return false;
+        }
+
+        // Add the current request's timestamp and save it
+        $timestamps[] = $now;
+        $this->cache->put($limitKey, $timestamps, 86400); // Store for a day
+
+        return true;
     }
 }

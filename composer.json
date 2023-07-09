@@ -3,9 +3,10 @@
     "description": "This package wraps default hubspot/api-client package with a rate limiter, so that you dont breach API limits",
     "type": "library",
     "require": {
-        "php": ">=7.4",
-        "hubspot/hubspot": "^8.0",
-        "predis/predis": "^2.2"
+        "php": ">=8.0",
+        "hubspot/api-client": "^8.0",
+        "predis/predis": "^2.2",
+        "illuminate/cache": "^8.0"
     },
     "autoload": {
         "psr-4": {
