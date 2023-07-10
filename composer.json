@@ -2,6 +2,7 @@
     "name": "alialican/hubspot-rate-limiter",
     "description": "This package wraps default hubspot/api-client package with a rate limiter, so that you dont breach API limits",
     "type": "library",
+    "license": "MIT",
     "require": {
         "php": ">=8.0",
         "hubspot/api-client": "^8.0",
