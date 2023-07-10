@@ -10,7 +10,6 @@ class HubspotClientWrapper
 {
     public function __construct(
         protected Discovery $hubspotClient,
-        protected Cache $cache,
         protected int $secondLimit = 100,
         protected int $dailyLimit = 250000,
         protected int $retryInterval = 10000
@@ -61,8 +60,8 @@ class HubspotClientWrapper
             return 1
         LUA;
 
-        if ($this->cache->getStore() instanceof RedisStore) {
-            $redis = $this->cache->getStore()->connection();
+        if (Cache::getStore() instanceof RedisStore) {
+            $redis = Cache::getStore()->connection();
             $result = $redis->eval(
                 $luaScript,
                 2,
@@ -83,7 +82,7 @@ class HubspotClientWrapper
 
     protected function genericRateLimit(string $limitKey, int $limitValue, int $interval): bool
     {
-        $timestamps = $this->cache->get($limitKey, []);
+        $timestamps = Cache::get($limitKey, []);
 
         $now = microtime(true);
         $limitTimestamp = $now - ($interval * 1000000);;
@@ -100,7 +99,7 @@ class HubspotClientWrapper
 
         // Add the current request's timestamp and save it
         $timestamps[] = $now;
-        $this->cache->put($limitKey, $timestamps, 86400); // Store for a day
+        Cache::put($limitKey, $timestamps, 86400); // Store for a day
 
         return true;
     }
